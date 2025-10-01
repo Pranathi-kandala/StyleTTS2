@@ -14,6 +14,7 @@ import shutil
 import warnings
 warnings.simplefilter('ignore')
 from torch.utils.tensorboard import SummaryWriter
+import os.path as osp  # <-- needed for osp.join / exists
 
 from meldataset import build_dataloader
 
@@ -63,7 +64,6 @@ def main(config_path):
     file_handler.setFormatter(logging.Formatter('%(levelname)s:%(asctime)s: %(message)s'))
     logger.addHandler(file_handler)
 
-    
     batch_size = config.get('batch_size', 10)
 
     epochs = config.get('epochs', 200)
@@ -73,6 +73,7 @@ def main(config_path):
 
     data_params = config.get('data_params', None)
     sr = config['preprocess_params'].get('sr', 24000)
+    hop_length = config['preprocess_params'].get('hop_length', 300)  # <-- used below
     train_path = data_params['train_data']
     val_path = data_params['val_data']
     root_path = data_params['root_path']
@@ -142,11 +143,13 @@ def main(config_path):
         if config.get('first_stage_path', '') != '':
             first_stage_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
             print('Loading the first stage model at %s ...' % first_stage_path)
-            model, _, start_epoch, iters = load_checkpoint(model, 
+            model, _, start_epoch, iters = load_checkpoint(
+                model, 
                 None, 
                 first_stage_path,
                 load_only_params=True,
-                ignore_modules=['bert', 'bert_encoder', 'predictor', 'predictor_encoder', 'msd', 'mpd', 'wd', 'diffusion']) # keep starting epoch for tensorboard log
+                ignore_modules=['bert', 'bert_encoder', 'predictor', 'predictor_encoder', 'msd', 'mpd', 'wd', 'diffusion']
+            )  # keep starting epoch for tensorboard log
 
             # these epochs should be counted from the start epoch
             diff_epoch += start_epoch
@@ -187,7 +190,7 @@ def main(config_path):
     scheduler_params_dict['style_encoder']['max_lr'] = optimizer_params.ft_lr * 2
     
     optimizer = build_optimizer({key: model[key].parameters() for key in model},
-                                          scheduler_params_dict=scheduler_params_dict, lr=optimizer_params.lr)
+                                scheduler_params_dict=scheduler_params_dict, lr=optimizer_params.lr)
     
     # adjust BERT learning rate
     for g in optimizer.optimizers['bert'].param_groups:
@@ -208,8 +211,10 @@ def main(config_path):
         
     # load models if there is a model
     if load_pretrained:
-        model, optimizer, start_epoch, iters = load_checkpoint(model,  optimizer, config['pretrained_model'],
-                                    load_only_params=config.get('load_only_params', True))
+        model, optimizer, start_epoch, iters = load_checkpoint(
+            model, optimizer, config['pretrained_model'],
+            load_only_params=config.get('load_only_params', True)
+        )
         
     n_down = model.text_aligner.n_down
 
@@ -340,14 +345,12 @@ def main(config_path):
                 loss_sty = 0
                 loss_diff = 0
 
-                
             s_loss = 0
-            
 
             d, p = model.predictor(d_en, s_dur, 
-                                                    input_lengths, 
-                                                    s2s_attn_mono, 
-                                                    text_mask)
+                                   input_lengths, 
+                                   s2s_attn_mono, 
+                                   text_mask)
                 
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
             mel_len = min(int(mel_input_length.min().item() / 2 - 1), max_len // 2)
@@ -365,7 +368,8 @@ def main(config_path):
                 p_en.append(p[bib, :, random_start:random_start+mel_len])
                 gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
                 
-                y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
+                # --- use hop_length instead of hardcoded 300 ---
+                y = waves[bib][(random_start * 2) * hop_length:((random_start+mel_len) * 2) * hop_length]
                 wav.append(torch.from_numpy(y).to(device))
                 
                 # style reference (better to be different from the GT)
@@ -378,7 +382,6 @@ def main(config_path):
             p_en = torch.stack(p_en)
             gt = torch.stack(gt).detach()
             st = torch.stack(st).detach()
-            
             
             if gt.size(-1) < 80:
                 continue
@@ -423,8 +426,8 @@ def main(config_path):
                 _s2s_pred = _s2s_pred[:_text_length, :]
                 _text_input = _text_input[:_text_length].long()
                 _s2s_trg = torch.zeros_like(_s2s_pred)
-                for p in range(_s2s_trg.shape[0]):
-                    _s2s_trg[p, :_text_input[p]] = 1
+                for p_idx in range(_s2s_trg.shape[0]):
+                    _s2s_trg[p_idx, :_text_input[p_idx]] = 1
                 _dur_pred = torch.sigmoid(_s2s_pred).sum(axis=1)
 
                 loss_dur += F.l1_loss(_dur_pred[1:_text_length-1], 
@@ -450,8 +453,8 @@ def main(config_path):
                      loss_params.lambda_slm * loss_lm + \
                      loss_params.lambda_sty * loss_sty + \
                      loss_params.lambda_diff * loss_diff + \
-                    loss_params.lambda_mono * loss_mono + \
-                    loss_params.lambda_s2s * loss_s2s
+                     loss_params.lambda_mono * loss_mono + \
+                     loss_params.lambda_s2s * loss_s2s
             
             running_loss += loss_mel.item()
             g_loss.backward()
@@ -612,9 +615,9 @@ def main(config_path):
                     bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
                     d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
                     d, p = model.predictor(d_en, s, 
-                                                        input_lengths, 
-                                                        s2s_attn_mono, 
-                                                        text_mask)
+                                           input_lengths, 
+                                           s2s_attn_mono, 
+                                           text_mask)
                     # get clips
                     mel_len = int(mel_input_length.min().item() / 2 - 1)
                     en = []
@@ -631,7 +634,8 @@ def main(config_path):
                         p_en.append(p[bib, :, random_start:random_start+mel_len])
 
                         gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
-                        y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
+                        # --- use hop_length instead of hardcoded 300 ---
+                        y = waves[bib][(random_start * 2) * hop_length:((random_start+mel_len) * 2) * hop_length]
                         wav.append(torch.from_numpy(y).to(device))
 
                     wav = torch.stack(wav).float().detach()
