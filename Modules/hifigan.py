@@ -444,25 +444,67 @@ class Decoder(nn.Module):
 
         
     def forward(self, asr, F0_curve, N, s):
+        batch = asr.size(0)
+        target_len = asr.size(-1)
+
+        def _normalize_curve(curve, name):
+            if not torch.is_tensor(curve):
+                curve = torch.as_tensor(curve, device=asr.device, dtype=asr.dtype)
+            else:
+                curve = curve.to(device=asr.device, dtype=asr.dtype)
+
+            if curve.dim() == 0:
+                curve = curve.view(1, 1)
+            if curve.dim() == 1:
+                curve = curve.unsqueeze(0)
+            elif curve.dim() == 2 and curve.size(0) != batch and curve.size(1) == batch:
+                curve = curve.transpose(0, 1)
+            elif curve.dim() > 2:
+                curve = curve.reshape(curve.size(0), -1)
+                if curve.size(0) != batch and curve.size(1) == batch:
+                    curve = curve.transpose(0, 1)
+
+            if curve.size(0) == 1 and batch > 1:
+                curve = curve.expand(batch, curve.size(1))
+            elif curve.size(0) != batch:
+                total = curve.numel()
+                if total % batch == 0:
+                    curve = curve.reshape(batch, total // batch)
+                else:
+                    raise ValueError(f"Unexpected {name} shape {tuple(curve.shape)} (cannot match batch {batch})")
+
+            if curve.size(1) != target_len:
+                curve = F.interpolate(
+                    curve.unsqueeze(1),
+                    size=target_len,
+                    mode="linear",
+                    align_corners=False,
+                ).squeeze(1)
+
+            return curve.contiguous()
+
+        F0_curve = _normalize_curve(F0_curve, "F0_curve")
+        N = _normalize_curve(N, "N")
+
         if self.training:
             downlist = [0, 3, 7]
             F0_down = downlist[random.randint(0, 2)]
             downlist = [0, 3, 7, 15]
             N_down = downlist[random.randint(0, 3)]
             if F0_down:
-                F0_curve = nn.functional.conv1d(F0_curve.unsqueeze(1), torch.ones(1, 1, F0_down).to('cuda'), padding=F0_down//2).squeeze(1) / F0_down
+                kernel = torch.ones(1, 1, F0_down, device=F0_curve.device, dtype=F0_curve.dtype)
+                F0_curve = nn.functional.conv1d(F0_curve.unsqueeze(1), kernel, padding=F0_down // 2).squeeze(1) / F0_down
             if N_down:
-                N = nn.functional.conv1d(N.unsqueeze(1), torch.ones(1, 1, N_down).to('cuda'), padding=N_down//2).squeeze(1)  / N_down
+                kernel = torch.ones(1, 1, N_down, device=N.device, dtype=N.dtype)
+                N = nn.functional.conv1d(N.unsqueeze(1), kernel, padding=N_down // 2).squeeze(1) / N_down
 
-        
-        # F0 = self.F0_conv(F0_curve.unsqueeze(1)) > orginal 
         F0 = self.F0_conv(F0_curve.unsqueeze(1))
 
         N = self.N_conv(N.unsqueeze(1))
-        
+
         x = torch.cat([asr, F0, N], axis=1)
         x = self.encode(x, s)
-        
+
         asr_res = self.asr_res(asr)
         
         res = True
