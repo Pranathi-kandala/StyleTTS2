@@ -508,8 +508,18 @@ class Decoder(nn.Module):
                 N = nn.functional.conv1d(N.unsqueeze(1), torch.ones(1, 1, N_down).to('cuda'), padding=N_down//2).squeeze(1)  / N_down
 
         
-        F0 = self.F0_conv(F0_curve.unsqueeze(1))
-        N = self.N_conv(N.unsqueeze(1))
+        if F0_curve.dim() == 2:
+            F0_curve = F0_curve.unsqueeze(1)
+        elif F0_curve.dim() == 3 and F0_curve.size(1) != 1 and F0_curve.size(2) == 1:
+            F0_curve = F0_curve.transpose(1, 2)
+        elif F0_curve.dim() != 3:
+            raise ValueError(f"Unexpected F0_curve shape {F0_curve.shape}")
+
+        F0 = self.F0_conv(F0_curve)
+
+        if N.dim() == 2:
+            N = N.unsqueeze(1)
+        N = self.N_conv(N)
         
         x = torch.cat([asr, F0, N], axis=1)
         x = self.encode(x, s)
