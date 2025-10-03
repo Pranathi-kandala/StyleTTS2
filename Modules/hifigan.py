@@ -455,23 +455,32 @@ class Decoder(nn.Module):
 
             if curve.dim() == 0:
                 curve = curve.view(1, 1)
-            if curve.dim() == 1:
-                curve = curve.unsqueeze(0)
-            elif curve.dim() == 2 and curve.size(0) != batch and curve.size(1) == batch:
-                curve = curve.transpose(0, 1)
+            elif curve.dim() == 1:
+                curve = curve.view(1, -1)
             elif curve.dim() > 2:
                 curve = curve.reshape(curve.size(0), -1)
-                if curve.size(0) != batch and curve.size(1) == batch:
+
+            if curve.dim() == 2 and curve.size(0) != batch and curve.size(1) == batch:
+                curve = curve.transpose(0, 1)
+
+            if curve.dim() != 2:
+                curve = curve.reshape(1, -1)
+
+            if curve.size(0) != batch:
+                if curve.numel() == target_len:
+                    curve = curve.view(1, target_len)
+                elif curve.numel() % target_len == 0:
+                    curve = curve.view(-1, target_len)
+                elif curve.size(0) == 1:
+                    curve = curve.view(1, -1)
+                elif curve.size(1) == batch:
                     curve = curve.transpose(0, 1)
 
             if curve.size(0) == 1 and batch > 1:
                 curve = curve.expand(batch, curve.size(1))
-            elif curve.size(0) != batch:
-                total = curve.numel()
-                if total % batch == 0:
-                    curve = curve.reshape(batch, total // batch)
-                else:
-                    raise ValueError(f"Unexpected {name} shape {tuple(curve.shape)} (cannot match batch {batch})")
+
+            if curve.size(0) != batch:
+                raise ValueError(f"Unexpected {name} shape {tuple(curve.shape)} (cannot match batch {batch})")
 
             if curve.size(1) != target_len:
                 curve = F.interpolate(
